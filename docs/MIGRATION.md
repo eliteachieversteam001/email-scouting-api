@@ -38,22 +38,26 @@ MailClean had **no lists storage**. The frontend's Lists page is built from comp
 - The client never supplies a UID.
 - `userName` is a display snapshot for admin views only.
 
-### Security rules
+### Security rules: explicitly server-only
 
-Elite's `firestore.rules` has no catch-all `allow`, so these collections are already **denied to browser clients**. Only this API reaches them, through the Admin SDK. Adding explicit deny rules is optional but recommended:
+The explicit deny rules are on the **`email-scouting-firestore-rules`** branch of `eliteachieversteam001/elitesucessachievers`. That change is additive only; no existing Elite rule was modified.
 
 ```
-match /scouting_pools/{d=**}       { allow read, write: if false; }
-match /scouting_leads/{d=**}       { allow read, write: if false; }
-match /scouting_jobs/{d=**}        { allow read, write: if false; }
-match /email_verifications/{d=**}  { allow read, write: if false; }
-match /scouting_history/{d=**}     { allow read, write: if false; }
-match /scouting_usage/{d=**}       { allow read, write: if false; }
+match /scouting_pools/{document=**}      { allow read, write: if false; }
+match /scouting_leads/{document=**}      { allow read, write: if false; }
+match /scouting_jobs/{document=**}       { allow read, write: if false; }
+match /email_verifications/{document=**} { allow read, write: if false; }
+match /scouting_history/{document=**}    { allow read, write: if false; }
+match /scouting_usage/{document=**}      { allow read, write: if false; }
 ```
+
+- **Browsers / client SDK** (signed out, member, record owner, staff, admin): **denied**, including the `results/` and `days/` subcollections.
+- **This API through the Firebase Admin SDK:** **allowed**. The Admin SDK bypasses rules.
+- **Verification:** the Elite rules suite passes 119/119, including 10 new server-only tests. This API's own suite passes 150/150 with those rules loaded in the emulator.
 
 ### Indexes
 
-Composite indexes are listed in `firestore.indexes.json` and must be merged into the Elite project's indexes before the first production deploy. The emulator doesn't require them.
+The composite indexes in `firestore.indexes.json` have been merged into Elite's `firestore.indexes.json` on the same branch (13 existing indexes plus 7 new ones). Deploy them before the API goes live. The emulator doesn't require them.
 
 ### Existing MailClean data
 
