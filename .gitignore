@@ -11,3 +11,6 @@ __pycache__/
 *service-account*.json
 *firebase-adminsdk*.json
 secrets/
+
+# Firebase emulator logs
+*-debug.log

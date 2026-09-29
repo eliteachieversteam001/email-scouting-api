@@ -5,17 +5,15 @@ from __future__ import annotations
 import io
 import re
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from bson import ObjectId
-from bson.errors import InvalidId
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
+from app import store
 from app.auth import Member
-from app.db import get_db
 from app.verifier import EmailVerifier
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
@@ -39,11 +37,6 @@ def run_verify(email: str) -> dict[str, Any]:
     return verify_email(email)
 
 
-def utcnow() -> datetime:
-    """Naive UTC, matching MailClean's datetime.utcnow() storage format."""
-    return datetime.now(UTC).replace(tzinfo=None)
-
-
 def iso(value: Any) -> Any:
     return value.isoformat() if isinstance(value, datetime) else value
 
@@ -57,18 +50,21 @@ def failed_result(email: str) -> dict[str, Any]:
     }
 
 
-def object_id(value: str) -> ObjectId:
-    try:
-        return ObjectId(value)
-    except (InvalidId, TypeError):
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
+
+
+def check_job_id(job_id: str) -> str:
+    """Firestore auto-IDs only — also blocks path tricks like 'a/b'."""
+    if not JOB_ID_RE.match(job_id or ""):
         raise HTTPException(400, detail="Invalid job ID")
+    return job_id
 
 
-def owned_job(collection: str, job_id: str, member: Member, projection: dict[str, int] | None = None) -> dict[str, Any]:
-    job = get_db()[collection].find_one({"_id": object_id(job_id)}, projection)
+def owned_job(collection: str, job_id: str, member: Member) -> dict[str, Any]:
+    job = store.get_doc(collection, check_job_id(job_id))
     if not job:
         raise HTTPException(404, detail="Job not found")
-    if job.get("user_id") != member.uid:
+    if job.get("userId") != member.uid:
         raise HTTPException(403, detail="Not your job")
     return job
 
@@ -128,7 +124,4 @@ def csv_response(emails: list[str], filename: str) -> StreamingResponse:
 
 
 def log_verification(member: Member, email_count: int, source: str) -> None:
-    get_db()["verify_logs"].insert_one({
-        "user_id": member.uid, "user_name": member.name, "user_email": member.email,
-        "email_count": email_count, "source": source, "sent_at": utcnow(),
-    })
+    store.record_verification(member.uid, member.name, email_count, source)

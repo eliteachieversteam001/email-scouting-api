@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check app tests
+      - name: Type check
+        run: mypy app tests
+      - name: Tests (incl. real Firebase Auth/Firestore emulator integration)
+        env:
+          FIREBASE_PROJECT_ID: demo-elite
+        run: >
+          npx --yes firebase-tools@14 emulators:exec --only auth,firestore --project demo-elite
+          "FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 python -m pytest -p no:warnings -rs"

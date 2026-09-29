@@ -1,40 +1,66 @@
 # Email Scouting API
 
-This is the backend for Email Scouting (`scout.eliteachieversteam.com`). It is MailClean's email-verification and lead-scouting functionality, rebuilt so that the **only identity is the Elite Firebase account**.
+This is the backend for Email Scouting (`scout.eliteachieversteam.com`). It takes the useful functionality from MailClean (email verification, lead scouting, dashboards, imports and exports) and runs it entirely on the **Elite Firebase project `eliteachievers-b8782`**.
 
 ```
-Elite Firebase user (project eliteachievers-b8782)
-        ↓  signs in on the Email Scouting frontend
+Elite Firebase user
+      ↓  signs in on the Email Scouting frontend
 Firebase ID token  →  Authorization: Bearer <token>
-        ↓
-Email Scouting API: firebase_admin.auth.verify_id_token()
-        checks the signature, audience/issuer (eliteachievers-b8782), expiry, and revocation
-        ↓
-Firebase UID  →  users/{uid} in the Elite Firestore (read-only)
-        checks the status (banned/suspended), identity verification, and isAdmin
-        ↓
-the member's scouting data in MongoDB (user_id = Firebase UID)
+      ↓
+FastAPI  →  Firebase Admin SDK verify_id_token()
+      (checks signature, audience/issuer = eliteachievers-b8782, expiry, revocation)
+      ↓
+Firebase UID  →  Elite users/{uid} (read-only: status, identity, isAdmin)
+      ↓
+Firestore queries scoped to that UID  (scouting_jobs, scouting_leads, …)
 ```
 
-There is no MailClean account, password, JWT, signup, or users collection.
+| Layer | Used for |
+|---|---|
+| Firebase Authentication | The only identity. There are no Email Scouting accounts, passwords, JWTs or signup. |
+| Firestore | All Email Scouting data, written server-side through the Admin SDK |
+| Firebase Admin SDK | Token verification and Firestore access (server-side credentials only) |
+| Verification engine | MailClean logic, unchanged: format, DNS, MX, SMTP, disposable, catch-all, classification |
+| Firebase Storage | Not needed. CSV imports are parsed in memory and exports are generated on the fly. |
 
-## Run
+There is **no MongoDB**.
+
+## Firestore data
+
+All Email Scouting data lives in these collections. Each per-member document stores the verified `userId` (Firebase UID).
+
+| Collection | Contents |
+|---|---|
+| `scouting_pools/{CODE}` | Lead pools (admin-managed) |
+| `scouting_leads/{sha1(CODE:email)}` | Leads; `claimedBy` is the member's UID |
+| `scouting_jobs/{id}` + `results/{n}` | Claim-and-verify jobs |
+| `email_verifications/{id}` + `results/{n}` | Bulk CSV verification jobs |
+| `scouting_history/{id}` | Verification and outreach events |
+| `scouting_usage/{uid}` + `days/{YYYY-MM-DD}` | Usage totals and daily series (`_platform` holds platform totals) |
+
+These collections are server-only. Elite's security rules don't open them to browsers. `firestore.indexes.json` lists the composite indexes to deploy. `docs/MIGRATION.md` has the full MailClean → Firestore mapping.
+
+## Run locally
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-cp .env.example .env    # fill in values; the service-account JSON stays on the server
+cp .env.example .env        # the service-account JSON stays on the server, outside the repo
 uvicorn app.main:app --port 8000
 ```
 
-Checks: `ruff check app tests` · `mypy app tests` · `pytest`
-
-To run the integration tests against the Firebase emulators, which exercise real tokens with no auth mocks:
+## Tests
 
 ```bash
-firebase emulators:start --only auth,firestore --project demo-elite &
-FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-elite pytest
+scripts/test.sh             # starts the Firebase Auth + Firestore emulators and runs the full suite
+ruff check app tests && mypy app tests
 ```
+
+- **Persistence tests** run against the real Firestore emulator, which is wiped before each test.
+- **Authentication tests** use real Firebase Admin SDK verification:
+  - RS256 tokens signed locally: valid, expired, forged, from the wrong project, garbage
+  - Auth emulator tokens with no mocks
+- A plain `pytest` without the emulators runs only the pure tests and skips the rest.
 
 ## Access rules
 
@@ -42,25 +68,12 @@ These mirror the Elite frontend gate.
 
 | Elite `users/{uid}` | Member endpoints | Admin endpoints |
 |---|---|---|
-| no or invalid or expired or revoked token | 401 | 401 |
-| token is valid, but there's no Elite profile | 403 `Elite profile not found` | 403 |
-| `status: "banned"` | 403 `Account banned` | 403 |
-| `status: "suspended"` | 403 `Account suspended` | 403 |
-| no photo, or `identityVerification.status` ∉ {verified, manual_review} | 403 `Identity verification required on Elite` | 403 |
-| active and verified | ✅ | 403 `Admin access required` |
-| `isAdmin: true` | ✅ (never locked out) | ✅ |
+| Missing, invalid, expired or revoked token | 401 | 401 |
+| Firebase or Firestore unreachable | 503 (fails closed) | 503 |
+| Valid token, but no Elite profile | 403 | 403 |
+| `status: "banned"` or `"suspended"` | 403 | 403 |
+| No photo, or `identityVerification.status` ∉ {verified, manual_review} | 403 | 403 |
+| Active and verified | ✅ | 403 |
+| `isAdmin: true` (the same flag the Elite VPS API uses) | ✅ | ✅ |
 
-Admin status comes from Elite's `users/{uid}.isAdmin`. That is the same check the Elite VPS API uses.
-
-## Endpoints
-
-`/health` is the only public endpoint. Everything else needs a verified token.
-
-| Access | Endpoints |
-|---|---|
-| Member | `GET /dashboard/me`, `POST /verify/single`, `POST /verify/bulk`, `GET /results/{id}`, `GET /results/{id}/export`, `GET /leads/countries`, `POST /leads/claim-and-verify`, `GET /leads/status/{id}`, `GET /leads/history`, `GET /leads/results/{id}`, `GET /leads/export/{id}`, `POST /scout/log` |
-| Admin | `POST /admin/leads/upload/{code}`, `GET /admin/leads/stats`, `DELETE /admin/leads/delete/{code}`, `DELETE /admin/leads/delete-available/{code}`, `GET /admin/leads/sample/{code}`, `GET /admin/leads/jobs`, `GET /dashboard/admin`, `GET /dashboard/admin/user/{uid}`, `GET /admin/scout-logs` |
-
-Jobs are private to their owner. A member who requests someone else's job gets 403 `Not your job`.
-
-See `docs/MIGRATION.md` for what changed from MailClean.
+`/health` is the only public endpoint. Jobs are owner-only: requesting another member's job returns 403.

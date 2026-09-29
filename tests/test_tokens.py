@@ -30,7 +30,7 @@ import app.auth as auth_mod
 import app.common as common
 from app.firebase import _EmulatorCredential
 from app.main import create_app
-from tests.conftest import PROFILES, fake_verify_email
+from tests.conftest import PROFILES, docs, fake_verify_email
 
 PROJECT = "eliteachievers-b8782"
 KID = "test-kid-1"
@@ -108,11 +108,11 @@ def test_garbage_tokens_are_401(real_firebase: None, garbage: str) -> None:
 def test_protected_endpoint_end_to_end_with_real_verification(real_firebase: None, db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auth_mod, "profile_loader", lambda uid: PROFILES.get(uid))
     monkeypatch.setattr(common, "verify_email", fake_verify_email)
-    with TestClient(create_app(init_db=False)) as c:
+    with TestClient(create_app()) as c:
         ok = c.post("/verify/single", headers={"Authorization": f"Bearer {make_token('uid-member')}"}, json={"email": "owner@shop.com"})
         assert ok.status_code == 200
         assert ok.json()["category"] == "delivers"
-        assert db["verify_logs"].find_one()["user_id"] == "uid-member"
+        assert [d["userId"] for d in docs(db, "scouting_history")] == ["uid-member"]
 
         assert c.get("/dashboard/me", headers={"Authorization": f"Bearer {make_token(exp_offset=-60)}"}).status_code == 401
         assert c.get("/dashboard/me", headers={"Authorization": f"Bearer {make_token(project='evil')}"}).status_code == 401

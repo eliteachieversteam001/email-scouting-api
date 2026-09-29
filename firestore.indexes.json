@@ -1,0 +1,19 @@
+{
+  "indexes": [
+    { "collectionGroup": "scouting_jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "scouting_jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] },
+    { "collectionGroup": "scouting_jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "scouting_leads", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "country", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" } ] },
+    { "collectionGroup": "scouting_leads", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "claimedByJob", "order": "ASCENDING" }, { "fieldPath": "verifiedResult", "order": "ASCENDING" } ] },
+    { "collectionGroup": "scouting_history", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" }, { "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "scouting_history", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "type", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] }
+  ],
+  "fieldOverrides": []
+}

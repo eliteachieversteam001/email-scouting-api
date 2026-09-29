@@ -33,10 +33,6 @@ class Settings:
     # How long a member's Elite profile (status/admin/identity) is cached.
     profile_cache_seconds: int = field(default_factory=lambda: _int("PROFILE_CACHE_SECONDS", 30))
 
-    # Email Scouting application data (leads, jobs, logs) — no user accounts.
-    mongo_uri: str = field(default_factory=lambda: os.getenv("MONGO_URI", ""))
-    mongo_db: str = field(default_factory=lambda: os.getenv("MONGO_DB", "email_scouting"))
-
     allowed_origins: list[str] = field(default_factory=lambda: _list("ALLOWED_ORIGINS", "https://scout.eliteachieversteam.com"))
 
     # Verifier (unchanged MailClean settings).

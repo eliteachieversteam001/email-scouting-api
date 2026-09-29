@@ -18,6 +18,7 @@ Admin is Elite's users/{uid}.isAdmin — the same check the Elite VPS API uses.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -25,9 +26,12 @@ from typing import Any
 from cachetools import TTLCache
 from fastapi import Depends, Header, HTTPException, status
 from firebase_admin import auth as firebase_auth
+from firebase_admin import exceptions as firebase_exceptions
 
 from app.config import settings
 from app.firebase import get_app, get_firestore
+
+log = logging.getLogger("email_scouting.auth")
 
 IDENTITY_PASSING = {"verified", "manual_review"}
 
@@ -55,6 +59,10 @@ def _forbidden(detail: str) -> HTTPException:
     return HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
 
 
+def _unavailable() -> HTTPException:
+    return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication is temporarily unavailable")
+
+
 def bearer_token(authorization: str | None) -> str:
     if not authorization:
         raise _unauthorized("Not authenticated")
@@ -76,9 +84,12 @@ def verify_token(token: str) -> dict[str, Any]:
     except firebase_auth.UserDisabledError:
         raise _forbidden("Account disabled")
     except firebase_auth.CertificateFetchError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication is temporarily unavailable")
+        raise _unavailable()
     except (firebase_auth.InvalidIdTokenError, ValueError):
         raise _unauthorized("Invalid token")
+    except firebase_exceptions.FirebaseError:
+        # e.g. the revocation lookup couldn't reach Firebase: fail closed.
+        raise _unavailable()
     uid = decoded.get("uid") or decoded.get("sub")
     if not isinstance(uid, str) or not uid:
         raise _unauthorized("Invalid token")
@@ -97,11 +108,14 @@ profile_loader: Callable[[str], dict[str, Any] | None] = _read_profile
 
 
 def load_profile(uid: str) -> dict[str, Any] | None:
-    if settings.profile_cache_seconds <= 0:
-        return profile_loader(uid)
-    if uid not in _profile_cache:
-        _profile_cache[uid] = profile_loader(uid)
-    return _profile_cache[uid]
+    if settings.profile_cache_seconds > 0 and uid in _profile_cache:
+        return _profile_cache[uid]
+    profile = profile_loader(uid)
+    # A missing profile isn't cached, so a member who just signed up on Elite
+    # isn't locked out for the cache window. Read errors propagate (never cached).
+    if profile is not None and settings.profile_cache_seconds > 0:
+        _profile_cache[uid] = profile
+    return profile
 
 
 def clear_profile_cache() -> None:
@@ -142,7 +156,12 @@ def get_current_member(authorization: str | None = Header(default=None)) -> Memb
     """Authenticated Elite member (token verified, profile loaded, not banned/suspended)."""
     decoded = verify_token(bearer_token(authorization))
     uid = str(decoded.get("uid") or decoded.get("sub"))
-    profile = load_profile(uid)
+    try:
+        profile = load_profile(uid)
+    except Exception:
+        # Firestore unreachable: fail closed with 503, never grant access.
+        log.exception("Elite profile lookup failed")
+        raise _unavailable()
     if profile is None:
         raise _forbidden("Elite profile not found")
     return authorize(member_from(uid, decoded, profile), need_identity=False)

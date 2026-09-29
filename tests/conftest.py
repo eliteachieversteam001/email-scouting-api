@@ -1,6 +1,10 @@
-"""Test fixtures: in-memory MongoDB (mongomock), fake Elite profiles, and a
-controllable Firebase token verifier for endpoint tests. Real token
-verification is exercised separately in test_tokens.py."""
+"""Test fixtures.
+
+Persistence runs against the real Firestore emulator (wiped before each
+test), started by `scripts/test.sh` / CI via `firebase emulators:exec`.
+Endpoint tests use fake Elite profiles and a controllable token verifier;
+real Firebase token verification is exercised in test_tokens.py and
+test_emulator_integration.py."""
 
 from __future__ import annotations
 
@@ -8,18 +12,19 @@ import os
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("PROFILE_CACHE_SECONDS", "0")
+os.environ.setdefault("FIREBASE_PROJECT_ID", "demo-elite")
 
+import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-import mongomock
 import pytest
 from fastapi.testclient import TestClient
 from firebase_admin import auth as firebase_auth
 
 import app.auth as auth_mod
 import app.common as common
-from app.db import ensure_indexes, set_db
+from app import store
 from app.main import create_app
 
 PHOTO = "https://example.com/p.png"
@@ -63,12 +68,29 @@ def fake_verify_email(email: str) -> dict[str, Any]:
     return {**base, "risk": "LOW", "category": "delivers", "sendable": True, "message": "Mailbox confirmed"}
 
 
+FIRESTORE = os.getenv("FIRESTORE_EMULATOR_HOST")
+
+
+def reset_firestore() -> None:
+    project = os.environ["FIREBASE_PROJECT_ID"]
+    req = urllib.request.Request(f"http://{FIRESTORE}/emulator/v1/projects/{project}/databases/(default)/documents", method="DELETE")
+    urllib.request.urlopen(req).close()
+
+
 @pytest.fixture
 def db() -> Any:
-    database: Any = mongomock.MongoClient()["email_scouting_test"]
-    set_db(database)
-    ensure_indexes(database)
-    return database
+    """A clean Firestore (emulator). Returns the Admin SDK client used by the app."""
+    if not FIRESTORE:
+        pytest.skip("Firestore emulator not running — use scripts/test.sh")
+    reset_firestore()
+    return store.fs()
+
+
+def docs(db: Any, collection: str, **where: Any) -> list[dict[str, Any]]:
+    q = db.collection(collection)
+    for k, v in where.items():
+        q = q.where(filter=store.FieldFilter(k, "==", v))
+    return [s.to_dict() for s in q.stream()]
 
 
 @pytest.fixture
@@ -78,7 +100,7 @@ def client(db: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setattr(auth_mod, "profile_loader", lambda uid: PROFILES.get(uid))
     monkeypatch.setattr(common, "verify_email", fake_verify_email)
     auth_mod.clear_profile_cache()
-    with TestClient(create_app(init_db=False)) as c:
+    with TestClient(create_app()) as c:
         yield c
 
 

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import Member, authorize, bearer_token
 from app.main import create_app
-from tests.conftest import bearer
+from tests.conftest import bearer, docs
 
 MEMBER_ENDPOINT = "/dashboard/me"
 ADMIN_ENDPOINT = "/admin/leads/stats"
@@ -74,9 +74,10 @@ def test_uid_comes_from_the_token_not_the_client(client: TestClient, db) -> None
         json={"batch_number": 1, "total_batches": 1, "email_count": 10, "subject": "Hi", "user_id": "uid-member-2", "uid": "uid-member-2"},
     )
     assert r.status_code == 200
-    rows = list(db["scout_logs"].find())
+    rows = docs(db, "scouting_history", type="outreach")
     assert len(rows) == 1
-    assert rows[0]["user_id"] == "uid-member"
+    assert rows[0]["userId"] == "uid-member"
+    assert not docs(db, "scouting_history", userId="uid-member-2")
 
 
 # ── member status ─────────────────────────────────────────────────────────────
@@ -123,7 +124,7 @@ def test_non_admins_get_403_on_admin_endpoints(client: TestClient, who: str) -> 
 
 def _protected_routes() -> list[tuple[str, str]]:
     out = []
-    for route in create_app(init_db=False).routes:
+    for route in create_app().routes:
         if isinstance(route, APIRoute) and route.path != "/health":
             for method in route.methods - {"HEAD", "OPTIONS"}:
                 out.append((method, route.path.replace("{job_id}", "0" * 24).replace("{country}", "US").replace("{uid}", "uid-member")))
@@ -189,3 +190,65 @@ def test_policy_matrix() -> None:
 def test_bearer_parsing() -> None:
     assert bearer_token("Bearer abc") == "abc"
     assert bearer_token("bearer   abc  ") == "abc"
+
+
+# ── outages fail closed ───────────────────────────────────────────────────────
+
+def test_firebase_unreachable_during_verification_is_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from firebase_admin import auth as firebase_auth
+    from firebase_admin import exceptions as fx
+
+    def down(*a: object, **k: object) -> None:
+        raise fx.UnavailableError("revocation lookup failed")
+
+    monkeypatch.setattr(firebase_auth, "verify_id_token", down)
+    r = client.get(MEMBER_ENDPOINT, headers=bearer("member"))
+    assert r.status_code == 503 and r.json()["detail"] == "Authentication is temporarily unavailable"
+
+
+def test_certificate_fetch_failure_is_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from firebase_admin import auth as firebase_auth
+
+    def down(*a: object, **k: object) -> None:
+        raise firebase_auth.CertificateFetchError("no certs", None)
+
+    monkeypatch.setattr(firebase_auth, "verify_id_token", down)
+    assert client.get(MEMBER_ENDPOINT, headers=bearer("member")).status_code == 503
+
+
+def test_firestore_unreachable_is_503_never_access(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.auth as auth_mod
+
+    def down(uid: str) -> None:
+        raise RuntimeError("firestore deadline exceeded")
+
+    monkeypatch.setattr(auth_mod, "profile_loader", down)
+    r = client.get(MEMBER_ENDPOINT, headers=bearer("member"))
+    assert r.status_code == 503
+    assert "firestore" not in r.text
+
+
+# ── profile cache ─────────────────────────────────────────────────────────────
+
+def test_profile_cache_hits_and_never_caches_missing_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    import app.auth as auth_mod
+
+    calls: list[str] = []
+    store: dict[str, dict[str, object] | None] = {"a": {"status": "active"}, "b": None}
+
+    def loader(uid: str) -> dict[str, object] | None:
+        calls.append(uid)
+        return store[uid]
+
+    monkeypatch.setattr(auth_mod, "settings", dataclasses.replace(auth_mod.settings, profile_cache_seconds=30))
+    monkeypatch.setattr(auth_mod, "profile_loader", loader)
+    auth_mod.clear_profile_cache()
+    auth_mod.load_profile("a")
+    auth_mod.load_profile("a")
+    assert calls == ["a"]  # cached
+    assert auth_mod.load_profile("b") is None
+    store["b"] = {"status": "active"}  # member finishes Elite signup
+    assert auth_mod.load_profile("b") == {"status": "active"}  # not stuck on a cached "missing"
+    auth_mod.clear_profile_cache()

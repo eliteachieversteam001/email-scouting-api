@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 import app.auth as auth_mod
 import app.common as common
 from app.main import create_app
-from tests.conftest import fake_verify_email
+from tests.conftest import docs, fake_verify_email
 
 AUTH = os.getenv("FIREBASE_AUTH_EMULATOR_HOST")
 STORE = os.getenv("FIRESTORE_EMULATOR_HOST")
@@ -54,14 +54,15 @@ MEMBER = {"displayName": "Ada", "status": "active", "isAdmin": False, "profilePi
 def live(db: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(common, "verify_email", fake_verify_email)
     auth_mod.clear_profile_cache()
-    return TestClient(create_app(init_db=False))
+    return TestClient(create_app())
 
 
 def test_real_member_token_reaches_their_own_data(live: TestClient, db: Any) -> None:
     uid, token = _user(MEMBER)
     r = live.post("/verify/single", headers={"Authorization": f"Bearer {token}"}, json={"email": "owner@shop.com"})
     assert r.status_code == 200, r.text
-    assert db["verify_logs"].find_one()["user_id"] == uid
+    assert [d["userId"] for d in docs(db, "scouting_history")] == [uid]
+    assert db.collection("scouting_usage").document(uid).get().to_dict()["verified"] == 1
 
 
 @pytest.mark.parametrize(("profile", "code", "detail"), [

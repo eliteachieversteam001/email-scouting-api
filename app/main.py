@@ -8,31 +8,21 @@ endpoints: accounts and member status live in Elite.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.db import ensure_indexes
 from app.routes import dashboard, leads, verify
 
 log = logging.getLogger("email_scouting")
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    ensure_indexes()
-    yield
-
-
-def create_app(*, init_db: bool = True) -> FastAPI:
+def create_app() -> FastAPI:
     app = FastAPI(
         title="Email Scouting API",
         version="3.0.0",
-        lifespan=lifespan if init_db else None,
         docs_url=None if settings.is_production else "/docs",
         redoc_url=None,
         openapi_url=None if settings.is_production else "/openapi.json",

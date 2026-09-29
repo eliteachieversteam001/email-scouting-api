@@ -1,4 +1,5 @@
-"""Single and bulk verification (MailClean /verify/*, /results/*)."""
+"""Single and bulk verification (MailClean /verify/*, /results/*).
+Bulk jobs live in Firestore `email_verifications/{id}` (+ results)."""
 
 from __future__ import annotations
 
@@ -7,30 +8,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from typing import Any
 
-from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app import store
 from app.auth import Member, require_member
-from app.common import (
-    EMAIL_RE,
-    csv_response,
-    emails_from_csv,
-    failed_result,
-    filter_category,
-    log_verification,
-    owned_job,
-    percent,
-    run_verify,
-    utcnow,
-)
+from app.common import EMAIL_RE, csv_response, emails_from_csv, failed_result, filter_category, log_verification, owned_job, percent, run_verify
 from app.config import settings
-from app.db import get_db
 
 router = APIRouter()
 
 MAX_SINGLE_BATCH = 25
 BULK_STALE_AFTER = timedelta(hours=3)
+FLUSH_EVERY = 50
 
 
 class SingleEmailRequest(BaseModel):
@@ -67,61 +57,54 @@ async def verify_bulk(background_tasks: BackgroundTasks, file: UploadFile = File
     if len(emails) > settings.max_bulk_emails:
         raise HTTPException(400, detail=f"Max {settings.max_bulk_emails:,} emails per job")
 
-    db = get_db()
-    job_id = db["verify_jobs"].insert_one({
-        "user_id": member.uid, "user_name": member.name, "user_email": member.email,
-        "status": "processing", "progress": 0, "total": len(emails),
-        "created_at": utcnow(), "completed_at": None,
-    }).inserted_id
-    background_tasks.add_task(run_bulk_job, str(job_id), emails, member)
-    return {"job_id": str(job_id), "total": len(emails)}
+    job_id = store.create_doc(store.VERIFICATIONS, {
+        "userId": member.uid, "userName": member.name, "status": "processing",
+        "progress": 0, "total": len(emails), "createdAt": store.now(), "completedAt": None,
+    })
+    background_tasks.add_task(run_bulk_job, job_id, emails, member)
+    return {"job_id": job_id, "total": len(emails)}
 
 
 def run_bulk_job(job_id: str, emails: list[str], member: Member) -> None:
-    db = get_db()
-    oid = ObjectId(job_id)
-    rows: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    written = 0
     try:
         with ThreadPoolExecutor(max_workers=settings.max_threads) as executor:
             futures = {executor.submit(run_verify, e): e for e in emails}
             for i, future in enumerate(as_completed(futures), 1):
                 try:
-                    result = future.result()
+                    pending.append(future.result())
                 except Exception:
-                    result = failed_result(futures[future])
-                rows.append({"job_id": job_id, "idx": i, "result": result})
-                if len(rows) >= 50 or i == len(emails):
-                    db["verify_results"].insert_many(rows)
-                    rows = []
-                    db["verify_jobs"].update_one({"_id": oid}, {"$set": {"progress": i}})
-        db["verify_jobs"].update_one({"_id": oid}, {"$set": {"status": "done", "completed_at": utcnow()}})
+                    pending.append(failed_result(futures[future]))
+                if len(pending) >= FLUSH_EVERY or i == len(emails):
+                    store.write_results(store.VERIFICATIONS, job_id, written + 1, pending)
+                    written += len(pending)
+                    pending = []
+                    store.update_doc(store.VERIFICATIONS, job_id, {"progress": i})
+        store.update_doc(store.VERIFICATIONS, job_id, {"status": "done", "completedAt": store.now()})
         log_verification(member, len(emails), "bulk")
     except Exception:
-        db["verify_jobs"].update_one({"_id": oid}, {"$set": {"status": "failed", "completed_at": utcnow()}})
+        store.update_doc(store.VERIFICATIONS, job_id, {"status": "failed", "completedAt": store.now()})
 
 
 def _bulk_job(job_id: str, member: Member) -> dict[str, Any]:
-    job = owned_job("verify_jobs", job_id, member)
-    stale = job["status"] == "processing" and job.get("created_at") and utcnow() - job["created_at"] > BULK_STALE_AFTER
+    job = owned_job(store.VERIFICATIONS, job_id, member)
+    created = job.get("createdAt")
+    stale = job["status"] == "processing" and created is not None and store.now() - created > BULK_STALE_AFTER
     if job["status"] == "failed" or stale:
         # The frontend shows 404 details as a friendly "not found" state.
         raise HTTPException(404, detail="This verification job didn't finish. Please upload the file again.")
     return job
 
 
-def _bulk_results(job_id: str) -> list[dict[str, Any]]:
-    cur = get_db()["verify_results"].find({"job_id": job_id}, {"_id": 0, "result": 1}).sort("idx", 1)
-    return [r["result"] for r in cur]
-
-
 @router.get("/results/{job_id}")
 def get_results(job_id: str, member: Member = Depends(require_member)) -> Any:
     job = _bulk_job(job_id, member)
     done = job["status"] == "done"
+    progress, total = int(job.get("progress", 0)), int(job.get("total", 0))
     return {
-        "job_id": job_id, "status": job["status"], "progress": job.get("progress", 0), "total": job.get("total", 0),
-        "percent": percent(job.get("progress", 0), job.get("total", 0)),
-        "results": _bulk_results(job_id) if done else [],
+        "job_id": job_id, "status": job["status"], "progress": progress, "total": total, "percent": percent(progress, total),
+        "results": store.read_results(store.VERIFICATIONS, job_id) if done else [],
     }
 
 
@@ -130,5 +113,5 @@ def export_results(job_id: str, category: str = "all", member: Member = Depends(
     job = _bulk_job(job_id, member)
     if job["status"] != "done":
         raise HTTPException(400, detail="Job still processing")
-    emails = [r["email"] for r in filter_category(_bulk_results(job_id), category) if r.get("email")]
+    emails = [r["email"] for r in filter_category(store.read_results(store.VERIFICATIONS, job_id), category) if r.get("email")]
     return csv_response(emails, f"email-scouting_{category}_{job_id[:8]}.csv")
