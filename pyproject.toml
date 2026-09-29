@@ -1,0 +1,37 @@
+[project]
+name = "email-scouting-api"
+version = "3.0.0"
+description = "Email Scouting API — MailClean functionality on Elite Firebase identity"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 160
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "BLE", "C4", "RUF"]
+ignore = [
+  "B008",   # FastAPI Depends()/File() in defaults is the framework's idiom
+  "B904",   # HTTPException raised from except blocks intentionally hides internals
+  "E501",
+  "RUF001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Verifier logic is MailClean's, kept unchanged on purpose.
+"app/verifier.py" = ["BLE001", "S110", "S311", "RUF059", "UP041", "C401", "I001", "UP015", "S603"]
+"tests/**" = ["S101", "S105", "S106", "S310", "BLE001"]
+# Background workers must never crash on one bad row / verifier error.
+"app/routes/*.py" = ["BLE001"]
+"app/common.py" = ["BLE001"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true
+exclude = ["app/verifier.py", ".venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
